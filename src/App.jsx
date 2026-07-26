@@ -22,6 +22,18 @@ function fmt(n) {
   return Number(n.toFixed(2)).toLocaleString("en-BD");
 }
 
+const NOTES_STORAGE_KEY = "totaltap_notes";
+
+function loadNotes() {
+  try {
+    const raw = localStorage.getItem(NOTES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function monthKey(ts) {
   const d = new Date(ts);
   return `${d.getFullYear()}-${d.getMonth()}`;
@@ -103,7 +115,7 @@ function ChaHisab() {
   const { lang, t } = useLang();
   const [display, setDisplay] = useState("0");
   const [expr, setExpr] = useState("");
-  const [notes, setNotes] = useState([]); // {id, name, entries:[{amount, ts}]}
+  const [notes, setNotes] = useState(loadNotes); // {id, name, entries:[{amount, ts}]}
   const [view, setView] = useState("calc"); // calc | notes | noteDetail | notifications
   const [activeNoteId, setActiveNoteId] = useState(null);
   const [addingNote, setAddingNote] = useState(false);
@@ -112,6 +124,16 @@ function ChaHisab() {
   const [dueMode, setDueMode] = useState(false);
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
+
+  // প্রতিবার নোট আপডেট হলে সাথে সাথে localStorage-এ সেভ হয়ে যায়,
+  // তাই অ্যাপ বন্ধ করলে বা রিফ্রেশ দিলেও ডেটা মুছে যায় না।
+  useEffect(() => {
+    try {
+      localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(notes));
+    } catch {
+      // storage unavailable (private mode etc.) — ignore, in-memory state still works
+    }
+  }, [notes]);
 
   function pressKey(raw) {
     if (raw === "C") {
@@ -408,26 +430,28 @@ function TopBar({ title, onBack, right, showIcon }) {
       style={{
         display: "flex",
         alignItems: "center",
-        justifyContent: "space-between",
         padding: "14px 18px 6px",
         gap: 8,
       }}
     >
-      <button
-        onClick={onBack}
-        style={{
-          visibility: onBack ? "visible" : "hidden",
-          background: "none",
-          border: "none",
-          color: PALETTE.cream,
-          display: "flex",
-          alignItems: "center",
-          cursor: "pointer",
-          padding: 4,
-        }}
-      >
-        <ChevronLeft size={22} />
-      </button>
+      {onBack && (
+        <button
+          onClick={onBack}
+          style={{
+            background: "none",
+            border: "none",
+            color: PALETTE.cream,
+            display: "flex",
+            alignItems: "center",
+            cursor: "pointer",
+            padding: 4,
+            marginLeft: -4,
+            flexShrink: 0,
+          }}
+        >
+          <ChevronLeft size={22} />
+        </button>
+      )}
       <div
         style={{
           display: "flex",
@@ -462,7 +486,15 @@ function TopBar({ title, onBack, right, showIcon }) {
           {title}
         </span>
       </div>
-      <div style={{ minWidth: 22, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
+      <div
+        style={{
+          marginLeft: "auto",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 8,
+        }}
+      >
         {right}
         <LangToggle />
       </div>
