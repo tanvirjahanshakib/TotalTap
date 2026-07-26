@@ -21,6 +21,7 @@
     "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "^6.1.2",
     "@capacitor/core": "^6.1.2",
+    "@capacitor/status-bar": "^6.0.1",
     "@vitejs/plugin-react": "^4.3.1",
     "vite": "^5.4.2"
   }

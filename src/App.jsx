@@ -281,46 +281,28 @@ function ChaHisab() {
   return (
     <div
       style={{
-        minHeight: "100vh",
+        // Fill the entire real screen — no floating "phone inside a phone" card.
+        minHeight: "100dvh",
+        width: "100%",
         background: `radial-gradient(circle at 50% -10%, #241f1a 0%, ${PALETTE.bg} 55%)`,
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
         fontFamily:
           "'Hind Siliguri', 'Segoe UI', system-ui, -apple-system, sans-serif",
-        padding: "24px 12px",
+        boxSizing: "border-box",
+        // Push content clear of notches / the status bar and the gesture/nav bar.
+        paddingTop: "max(14px, env(safe-area-inset-top))",
+        paddingBottom: "max(14px, env(safe-area-inset-bottom))",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
       }}
     >
       <div
         style={{
-          width: 360,
-          maxWidth: "100%",
-          background: PALETTE.panel,
-          borderRadius: 34,
-          border: `1px solid #3a322b`,
-          boxShadow: "0 30px 60px -20px rgba(0,0,0,0.6)",
-          overflow: "hidden",
+          width: "100%",
+          maxWidth: 480,
+          margin: "0 auto",
           position: "relative",
         }}
       >
-        {/* Notch bar */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            paddingTop: 10,
-          }}
-        >
-          <div
-            style={{
-              width: 70,
-              height: 5,
-              borderRadius: 3,
-              background: "#3a322b",
-            }}
-          />
-        </div>
-
         {view === "calc" && (
           <CalcView
             display={display}
