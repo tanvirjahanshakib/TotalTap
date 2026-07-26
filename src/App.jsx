@@ -1,6 +1,13 @@
-import React, { useState, useMemo, useEffect, createContext, useContext } from "react";
-import { Plus, X, ChevronLeft, Wallet, Trash2, Bell, Languages } from "lucide-react";
+import React, { useState, useMemo, useEffect, useRef, createContext, useContext } from "react";
+import { Plus, X, ChevronLeft, Wallet, Trash2, Bell, Languages, LogIn, LogOut } from "lucide-react";
 import { STRINGS, LANG_STORAGE_KEY } from "./strings";
+import {
+  onAuthChange,
+  signInWithGoogle,
+  signOutUser,
+  loadNotesFromCloud,
+  saveNotesToCloud,
+} from "./firebase";
 import appIcon from "../resources/icon.png";
 
 // ---- helpers ----
@@ -122,8 +129,75 @@ function ChaHisab() {
   const [newNoteName, setNewNoteName] = useState("");
   const [flash, setFlash] = useState(null);
   const [dueMode, setDueMode] = useState(false);
+  const [pendingSettles, setPendingSettles] = useState([]); // [{noteId, ts, amount}] — ক্যালকুলেটরে যোগ হওয়া বাকি এন্ট্রিগুলো
+  const [settlingEntry, setSettlingEntry] = useState(null); // {noteId, entry} — এমাউন্ট বাছাই মোডাল খোলা থাকলে
+  const [settleAmountInput, setSettleAmountInput] = useState("");
+  const [user, setUser] = useState(null); // লগইন করা থাকলে Firebase ইউজার অবজেক্ট, না হলে null
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | pulling | error
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
+
+  // অন্য effect-এর ভেতর থেকে সবসময় সর্বশেষ notes-টা পড়ার জন্য (auth-change লিসেনারে stale ভ্যালু এড়াতে)
+  const notesRef = useRef(notes);
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
+  // লগইন/লগআউট হলে এখানে জানা যায়। প্রথমবার লগইন করলে: ক্লাউডে আগের ডেটা থাকলে সেটাই
+  // এখন থেকে সোর্স অফ ট্রুথ হবে (অ্যাপ রিইনস্টল/আপডেট করে লগইন করলে ঠিক এভাবেই সব ফিরে পাবেন)।
+  // ক্লাউডে কিছু না থাকলে (প্রথমবার লিঙ্ক করা হচ্ছে) — বর্তমান লোকাল ডেটা ক্লাউডে তুলে দেওয়া হয়।
+  useEffect(() => {
+    const unsub = onAuthChange(async (u) => {
+      setUser(u);
+      if (!u) return;
+      setSyncStatus("pulling");
+      try {
+        const cloudNotes = await loadNotesFromCloud(u.uid);
+        if (cloudNotes) {
+          setNotes(cloudNotes);
+        } else {
+          await saveNotesToCloud(u.uid, notesRef.current);
+        }
+        setSyncStatus("idle");
+      } catch (err) {
+        console.error(err);
+        setSyncStatus("error");
+      }
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // লগইন করা অবস্থায় নোটে কোনো বদল হলে (নতুন এন্ট্রি, পরিশোধ, ডিলিট ইত্যাদি) —
+  // একটু দেরি করে (debounce) সেই বদলটা ক্লাউডেও তুলে দেওয়া হয়
+  useEffect(() => {
+    if (!user) return;
+    const timer = setTimeout(() => {
+      saveNotesToCloud(user.uid, notes).catch((err) => {
+        console.error(err);
+        setSyncStatus("error");
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [notes, user]);
+
+  async function handleGoogleLogin() {
+    try {
+      setSyncStatus("pulling");
+      await signInWithGoogle();
+    } catch (err) {
+      console.error(err);
+      setSyncStatus("error");
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await signOutUser();
+    } catch (err) {
+      console.error(err);
+    }
+  }
 
   // প্রতিবার নোট আপডেট হলে সাথে সাথে localStorage-এ সেভ হয়ে যায়,
   // তাই অ্যাপ বন্ধ করলে বা রিফ্রেশ দিলেও ডেটা মুছে যায় না।
@@ -139,6 +213,7 @@ function ChaHisab() {
     if (raw === "C") {
       setExpr("");
       setDisplay("0");
+      setPendingSettles([]);
       return;
     }
     if (raw === "⌫") {
@@ -171,14 +246,67 @@ function ChaHisab() {
   function addToNote(noteId) {
     const val = currentValue();
     if (val === null || val === 0) return;
-    const entry = dueMode
-      ? { amount: val, ts: Date.now(), status: "due", settledAt: null }
-      : { amount: val, ts: Date.now(), status: "paid", settledAt: null };
-    setNotes((prev) =>
-      prev.map((n) =>
-        n.id === noteId ? { ...n, entries: [...n.entries, entry] } : n
-      )
-    );
+
+    const queued = pendingSettles.filter((p) => p.noteId === noteId);
+    const queuedSum = queued.reduce((s, p) => s + p.amount, 0);
+    const now = Date.now();
+
+    if (queued.length > 0) {
+      // এই ক্যালকুলেশনে আগের বাকি (পুরো বা আংশিক) মেশানো আছে —
+      // যতটুকু বাছাই করা হয়েছে ততটুকু পরিশোধ (paid) হবে, বাকি অংশ থাকলে সেটা এখনো "বাকি" হিসেবেই থাকবে
+      const remainder = Math.max(0, val - queuedSum);
+      setNotes((prev) =>
+        prev.map((n) => {
+          if (n.id !== noteId) return n;
+          const nextEntries = [];
+          n.entries.forEach((e) => {
+            const q = queued.find((p) => p.ts === e.ts);
+            if (!q) {
+              nextEntries.push(e);
+              return;
+            }
+            const payAmount = Math.min(q.amount, e.amount);
+            if (payAmount >= e.amount) {
+              // পুরোটাই পরিশোধ
+              nextEntries.push({ ...e, status: "paid", settledAt: now });
+            } else {
+              // আংশিক পরিশোধ — এন্ট্রিটা ভাগ হয়ে যাবে
+              nextEntries.push({
+                amount: payAmount,
+                ts: e.ts,
+                status: "paid",
+                settledAt: now,
+              });
+              nextEntries.push({
+                amount: e.amount - payAmount,
+                ts: now + Math.floor(Math.random() * 900) + 1,
+                status: "due",
+                settledAt: null,
+              });
+            }
+          });
+          const withRemainder =
+            remainder > 0
+              ? [
+                  ...nextEntries,
+                  { amount: remainder, ts: now, status: "paid", settledAt: null },
+                ]
+              : nextEntries;
+          return { ...n, entries: withRemainder };
+        })
+      );
+      setPendingSettles((prev) => prev.filter((p) => p.noteId !== noteId));
+    } else {
+      const entry = dueMode
+        ? { amount: val, ts: now, status: "due", settledAt: null }
+        : { amount: val, ts: now, status: "paid", settledAt: null };
+      setNotes((prev) =>
+        prev.map((n) =>
+          n.id === noteId ? { ...n, entries: [...n.entries, entry] } : n
+        )
+      );
+    }
+
     const note = notes.find((n) => n.id === noteId);
     setFlash(note ? note.name : null);
     setTimeout(() => setFlash(null), 900);
@@ -186,21 +314,46 @@ function ChaHisab() {
     setDisplay("0");
     setDueMode(false);
   }
-  // বাকি (due) এন্ট্রি পরিশোধ হলে সেটা "paid" হয়ে যায় আর পরিশোধের তারিখ অনুযায়ী
-  // সেই মাসের চূড়ান্ত হিসাবে যোগ হয় — তবে বাকি নেওয়ার তারিখটাও সংরক্ষিত থাকে
-  function settleDue(noteId, ts) {
-    setNotes((prev) =>
-      prev.map((n) =>
-        n.id === noteId
-          ? {
-              ...n,
-              entries: n.entries.map((e) =>
-                e.ts === ts ? { ...e, status: "paid", settledAt: Date.now() } : e
-              ),
-            }
-          : n
-      )
-    );
+
+  // "পরিশোধ করুন" চাপলে প্রথমে একটা মোডাল খোলে যেখানে ইউজার বেছে নিতে পারেন কত টাকা
+  // এখন পরিশোধ করবেন (পুরোটা বা আংশিক)। বাছাই করা এমাউন্টটাই তখন ক্যালকুলেটরে যোগ হয়,
+  // আর নোটে অ্যাড করলে তখনই সেটুকু settle হয়ে যায়।
+  function openSettleModal(note, entry) {
+    setSettlingEntry({ noteId: note.id, entry });
+    setSettleAmountInput(String(entry.amount));
+  }
+
+  function cancelSettleModal() {
+    setSettlingEntry(null);
+    setSettleAmountInput("");
+  }
+
+  function confirmSettleAmount() {
+    if (!settlingEntry) return;
+    const { noteId, entry } = settlingEntry;
+    let chosen = parseFloat(settleAmountInput);
+    if (isNaN(chosen) || chosen <= 0) return;
+    if (chosen > entry.amount) chosen = entry.amount; // পুরো বাকির চেয়ে বেশি পরিশোধ করা যাবে না
+    queueSettle(noteId, entry, chosen);
+    setSettlingEntry(null);
+    setSettleAmountInput("");
+  }
+
+  function queueSettle(noteId, entry, chosenAmount) {
+    setPendingSettles((prev) => [
+      ...prev,
+      { noteId, ts: entry.ts, amount: chosenAmount },
+    ]);
+    setExpr((prev) => {
+      const next = prev ? `${prev}+${chosenAmount}` : `${chosenAmount}`;
+      setDisplay(next);
+      return next;
+    });
+    setView("calc");
+  }
+
+  function cancelQueuedSettle(ts) {
+    setPendingSettles((prev) => prev.filter((p) => p.ts !== ts));
   }
 
   function createNote() {
@@ -341,6 +494,8 @@ function ChaHisab() {
             flash={flash}
             notifCount={pendingNotifications.length}
             openNotifications={() => setView("notifications")}
+            pendingSettles={pendingSettles}
+            cancelQueuedSettle={cancelQueuedSettle}
           />
         )}
 
@@ -357,6 +512,10 @@ function ChaHisab() {
             onDelete={deleteNote}
             notifCount={pendingNotifications.length}
             openNotifications={() => setView("notifications")}
+            user={user}
+            syncStatus={syncStatus}
+            onLogin={handleGoogleLogin}
+            onLogout={handleLogout}
           />
         )}
 
@@ -374,7 +533,7 @@ function ChaHisab() {
             groups={groupedByMonth(activeNote)}
             monthlyTotal={monthlyTotal(activeNote)}
             dues={pendingDues(activeNote)}
-            onSettle={(ts) => settleDue(activeNote.id, ts)}
+            onQueueSettle={(entry) => openSettleModal(activeNote, entry)}
             onBack={() => setView("notes")}
             onDeleteEntry={(ts) => deleteEntry(activeNote.id, ts)}
           />
@@ -389,6 +548,16 @@ function ChaHisab() {
               setNewNoteName("");
             }}
             onCreate={createNote}
+          />
+        )}
+
+        {settlingEntry && (
+          <SettleAmountModal
+            dueAmount={settlingEntry.entry.amount}
+            value={settleAmountInput}
+            onChange={setSettleAmountInput}
+            onCancel={cancelSettleModal}
+            onConfirm={confirmSettleAmount}
           />
         )}
       </div>
@@ -517,6 +686,8 @@ function CalcView({
   flash,
   notifCount,
   openNotifications,
+  pendingSettles,
+  cancelQueuedSettle,
 }) {
   const { t } = useLang();
   return (
@@ -597,6 +768,62 @@ function CalcView({
           {display}
         </div>
       </div>
+
+      {pendingSettles && pendingSettles.length > 0 && (
+        <div
+          style={{
+            background: `${PALETTE.danger}18`,
+            border: `1px solid ${PALETTE.danger}55`,
+            borderRadius: 14,
+            padding: "10px 12px",
+            marginBottom: 10,
+          }}
+        >
+          <div
+            style={{
+              color: PALETTE.danger,
+              fontSize: 11.5,
+              fontWeight: 600,
+              marginBottom: 6,
+            }}
+          >
+            {t.settlingBanner}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {pendingSettles.map((p) => (
+              <div
+                key={p.ts}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  background: PALETTE.panelSoft,
+                  borderRadius: 10,
+                  padding: "4px 8px",
+                  fontSize: 12,
+                  color: PALETTE.cream,
+                }}
+              >
+                ৳{fmt(p.amount)} {t.due}
+                <button
+                  onClick={() => cancelQueuedSettle(p.ts)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: PALETTE.dim,
+                    cursor: "pointer",
+                    display: "flex",
+                    padding: 0,
+                  }}
+                  title={t.removeQueued}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* নগদ / বাকি টগল */}
       <div
@@ -814,6 +1041,10 @@ function NotesListView({
   onDelete,
   notifCount,
   openNotifications,
+  user,
+  syncStatus,
+  onLogin,
+  onLogout,
 }) {
   const { t } = useLang();
   return (
@@ -851,6 +1082,95 @@ function NotesListView({
           </button>
         }
       />
+
+      <div
+        style={{
+          marginTop: 4,
+          marginBottom: 16,
+          background: PALETTE.panelSoft,
+          borderRadius: 16,
+          padding: "14px 16px",
+          border: "1px solid #322b25",
+        }}
+      >
+        {user ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {user.photoURL && (
+              <img
+                src={user.photoURL}
+                alt=""
+                style={{ width: 32, height: 32, borderRadius: "50%", flexShrink: 0 }}
+              />
+            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  color: PALETTE.cream,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {user.displayName || user.email}
+              </div>
+              <div style={{ color: PALETTE.dim, fontSize: 11 }}>
+                {syncStatus === "pulling"
+                  ? t.syncPulling
+                  : syncStatus === "error"
+                  ? t.syncError
+                  : t.syncedAs(user.email)}
+              </div>
+            </div>
+            <button
+              onClick={onLogout}
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                background: "none",
+                border: "1px solid #3a322b",
+                color: PALETTE.dim,
+                borderRadius: 10,
+                padding: "7px 10px",
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              <LogOut size={13} /> {t.logout}
+            </button>
+          </div>
+        ) : (
+          <>
+            <button
+              onClick={onLogin}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                background: `linear-gradient(180deg, ${PALETTE.amber}, ${PALETTE.amberSoft})`,
+                border: "none",
+                color: "#1a1510",
+                borderRadius: 12,
+                padding: "11px 0",
+                fontSize: 13.5,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              <LogIn size={16} /> {t.loginWithGoogle}
+            </button>
+            <div style={{ color: PALETTE.dim, fontSize: 11, marginTop: 8, lineHeight: 1.5 }}>
+              {t.accountHint}
+            </div>
+          </>
+        )}
+      </div>
+
       {notes.length === 0 && (
         <div
           style={{
@@ -930,7 +1250,7 @@ function NotesListView({
   );
 }
 
-function NoteDetailView({ note, groups, monthlyTotal, dues, onSettle, onBack, onDeleteEntry }) {
+function NoteDetailView({ note, groups, monthlyTotal, dues, onQueueSettle, onBack, onDeleteEntry }) {
   const { t } = useLang();
   return (
     <div style={{ padding: "4px 18px 22px", minHeight: 480 }}>
@@ -994,7 +1314,7 @@ function NoteDetailView({ note, groups, monthlyTotal, dues, onSettle, onBack, on
                   </div>
                 </div>
                 <button
-                  onClick={() => onSettle(e.ts)}
+                  onClick={() => onQueueSettle(e)}
                   style={{
                     padding: "7px 12px",
                     borderRadius: 10,
@@ -1181,6 +1501,134 @@ function NotificationsView({ items, onBack, onDismiss }) {
             </button>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function SettleAmountModal({ dueAmount, value, onChange, onCancel, onConfirm }) {
+  const { t } = useLang();
+  const numVal = parseFloat(value);
+  const isValid = !isNaN(numVal) && numVal > 0;
+  const isPartial = isValid && numVal < dueAmount;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        background: "rgba(10,8,6,0.7)",
+        display: "flex",
+        alignItems: "flex-end",
+        borderRadius: 34,
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          background: PALETTE.panel,
+          borderTop: `1px solid #3a322b`,
+          borderRadius: "24px 24px 0 0",
+          padding: "20px 20px 26px",
+        }}
+      >
+        <div style={{ color: PALETTE.cream, fontWeight: 600, fontSize: 15, marginBottom: 4 }}>
+          {t.settleModalTitle}
+        </div>
+        <div style={{ color: PALETTE.dim, fontSize: 12, marginBottom: 12 }}>
+          {t.settleModalSubtitle(fmt(dueAmount))}
+        </div>
+        <input
+          autoFocus
+          type="number"
+          inputMode="decimal"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onConfirm()}
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            background: PALETTE.panelSoft,
+            border: `1px solid ${isValid ? "#3a322b" : PALETTE.danger}`,
+            borderRadius: 12,
+            padding: "12px 14px",
+            color: PALETTE.cream,
+            fontSize: 18,
+            outline: "none",
+          }}
+        />
+
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button
+            onClick={() => onChange(String(dueAmount))}
+            style={{
+              padding: "7px 12px",
+              borderRadius: 10,
+              border: `1px solid ${PALETTE.amberSoft}`,
+              background: "none",
+              color: PALETTE.amber,
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            {t.payFull(fmt(dueAmount))}
+          </button>
+          <button
+            onClick={() => onChange(String(Math.round((dueAmount / 2) * 100) / 100))}
+            style={{
+              padding: "7px 12px",
+              borderRadius: 10,
+              border: `1px solid #3a322b`,
+              background: "none",
+              color: PALETTE.dim,
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            {t.payHalf(fmt(dueAmount / 2))}
+          </button>
+        </div>
+
+        {isPartial && (
+          <div style={{ color: PALETTE.dim, fontSize: 11, marginTop: 8 }}>
+            {t.remainingDueNote(fmt(dueAmount - numVal))}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+          <button
+            onClick={onCancel}
+            style={{
+              flex: 1,
+              padding: "12px",
+              borderRadius: 12,
+              border: "1px solid #3a322b",
+              background: "none",
+              color: PALETTE.dim,
+              cursor: "pointer",
+            }}
+          >
+            {t.cancel}
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!isValid}
+            style={{
+              flex: 1,
+              padding: "12px",
+              borderRadius: 12,
+              border: "none",
+              background: isValid
+                ? `linear-gradient(180deg, ${PALETTE.amber}, ${PALETTE.amberSoft})`
+                : "#3a322b",
+              color: isValid ? "#1a1510" : PALETTE.dim,
+              fontWeight: 600,
+              cursor: isValid ? "pointer" : "not-allowed",
+            }}
+          >
+            {t.addToCalculator}
+          </button>
+        </div>
       </div>
     </div>
   );
