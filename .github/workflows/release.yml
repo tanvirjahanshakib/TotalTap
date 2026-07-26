@@ -1,0 +1,74 @@
+name: Build & Attach Android APK
+
+# Runs automatically whenever a GitHub Release is published.
+# Also runnable manually from the Actions tab (workflow_dispatch) to test a build
+# without creating a release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install web dependencies
+        run: npm install
+
+      - name: Build web bundle
+        run: npm run build
+
+      - name: Add Android platform (first run only)
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+
+      - name: Sync web assets into the Android project
+        run: npx cap sync android
+
+      - name: Generate app icon & splash screen
+        run: npx @capacitor/assets generate --android --iconBackgroundColor "#14110F" --splashBackgroundColor "#14110F" --splashBackgroundColorDark "#14110F"
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x android/gradlew
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          echo "APK found at: $APK_PATH"
+          echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: totaltap-apk
+          path: ${{ steps.apk.outputs.path }}
+
+      - name: Attach APK to the GitHub Release
+        if: ${{ github.event_name == 'release' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}

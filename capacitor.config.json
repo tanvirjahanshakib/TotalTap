@@ -1,0 +1,9 @@
+{
+  "appId": "com.tanvirjahanshakib.totaltap",
+  "appName": "TotalTap",
+  "webDir": "dist",
+  "backgroundColor": "#14110F",
+  "android": {
+    "backgroundColor": "#14110F"
+  }
+}
