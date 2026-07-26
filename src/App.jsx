@@ -1,13 +1,6 @@
-import React, { useState, useMemo, useEffect, useRef, createContext, useContext } from "react";
-import { Plus, X, ChevronLeft, Wallet, Trash2, Bell, Languages, LogIn, LogOut } from "lucide-react";
+import React, { useState, useMemo, useEffect, createContext, useContext } from "react";
+import { Plus, X, ChevronLeft, Wallet, Trash2, Bell, Languages } from "lucide-react";
 import { STRINGS, LANG_STORAGE_KEY } from "./strings";
-import {
-  onAuthChange,
-  signInWithGoogle,
-  signOutUser,
-  loadNotesFromCloud,
-  saveNotesToCloud,
-} from "./firebase";
 import appIcon from "../resources/icon.png";
 
 // ---- helpers ----
@@ -132,72 +125,8 @@ function ChaHisab() {
   const [pendingSettles, setPendingSettles] = useState([]); // [{noteId, ts, amount}] — ক্যালকুলেটরে যোগ হওয়া বাকি এন্ট্রিগুলো
   const [settlingEntry, setSettlingEntry] = useState(null); // {noteId, entry} — এমাউন্ট বাছাই মোডাল খোলা থাকলে
   const [settleAmountInput, setSettleAmountInput] = useState("");
-  const [user, setUser] = useState(null); // লগইন করা থাকলে Firebase ইউজার অবজেক্ট, না হলে null
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | pulling | error
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
-
-  // অন্য effect-এর ভেতর থেকে সবসময় সর্বশেষ notes-টা পড়ার জন্য (auth-change লিসেনারে stale ভ্যালু এড়াতে)
-  const notesRef = useRef(notes);
-  useEffect(() => {
-    notesRef.current = notes;
-  }, [notes]);
-
-  // লগইন/লগআউট হলে এখানে জানা যায়। প্রথমবার লগইন করলে: ক্লাউডে আগের ডেটা থাকলে সেটাই
-  // এখন থেকে সোর্স অফ ট্রুথ হবে (অ্যাপ রিইনস্টল/আপডেট করে লগইন করলে ঠিক এভাবেই সব ফিরে পাবেন)।
-  // ক্লাউডে কিছু না থাকলে (প্রথমবার লিঙ্ক করা হচ্ছে) — বর্তমান লোকাল ডেটা ক্লাউডে তুলে দেওয়া হয়।
-  useEffect(() => {
-    const unsub = onAuthChange(async (u) => {
-      setUser(u);
-      if (!u) return;
-      setSyncStatus("pulling");
-      try {
-        const cloudNotes = await loadNotesFromCloud(u.uid);
-        if (cloudNotes) {
-          setNotes(cloudNotes);
-        } else {
-          await saveNotesToCloud(u.uid, notesRef.current);
-        }
-        setSyncStatus("idle");
-      } catch (err) {
-        console.error(err);
-        setSyncStatus("error");
-      }
-    });
-    return unsub;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // লগইন করা অবস্থায় নোটে কোনো বদল হলে (নতুন এন্ট্রি, পরিশোধ, ডিলিট ইত্যাদি) —
-  // একটু দেরি করে (debounce) সেই বদলটা ক্লাউডেও তুলে দেওয়া হয়
-  useEffect(() => {
-    if (!user) return;
-    const timer = setTimeout(() => {
-      saveNotesToCloud(user.uid, notes).catch((err) => {
-        console.error(err);
-        setSyncStatus("error");
-      });
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [notes, user]);
-
-  async function handleGoogleLogin() {
-    try {
-      setSyncStatus("pulling");
-      await signInWithGoogle();
-    } catch (err) {
-      console.error(err);
-      setSyncStatus("error");
-    }
-  }
-
-  async function handleLogout() {
-    try {
-      await signOutUser();
-    } catch (err) {
-      console.error(err);
-    }
-  }
 
   // প্রতিবার নোট আপডেট হলে সাথে সাথে localStorage-এ সেভ হয়ে যায়,
   // তাই অ্যাপ বন্ধ করলে বা রিফ্রেশ দিলেও ডেটা মুছে যায় না।
@@ -512,10 +441,6 @@ function ChaHisab() {
             onDelete={deleteNote}
             notifCount={pendingNotifications.length}
             openNotifications={() => setView("notifications")}
-            user={user}
-            syncStatus={syncStatus}
-            onLogin={handleGoogleLogin}
-            onLogout={handleLogout}
           />
         )}
 
@@ -1041,10 +966,6 @@ function NotesListView({
   onDelete,
   notifCount,
   openNotifications,
-  user,
-  syncStatus,
-  onLogin,
-  onLogout,
 }) {
   const { t } = useLang();
   return (
@@ -1082,94 +1003,6 @@ function NotesListView({
           </button>
         }
       />
-
-      <div
-        style={{
-          marginTop: 4,
-          marginBottom: 16,
-          background: PALETTE.panelSoft,
-          borderRadius: 16,
-          padding: "14px 16px",
-          border: "1px solid #322b25",
-        }}
-      >
-        {user ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {user.photoURL && (
-              <img
-                src={user.photoURL}
-                alt=""
-                style={{ width: 32, height: 32, borderRadius: "50%", flexShrink: 0 }}
-              />
-            )}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  color: PALETTE.cream,
-                  fontSize: 13,
-                  fontWeight: 600,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {user.displayName || user.email}
-              </div>
-              <div style={{ color: PALETTE.dim, fontSize: 11 }}>
-                {syncStatus === "pulling"
-                  ? t.syncPulling
-                  : syncStatus === "error"
-                  ? t.syncError
-                  : t.syncedAs(user.email)}
-              </div>
-            </div>
-            <button
-              onClick={onLogout}
-              style={{
-                flexShrink: 0,
-                display: "flex",
-                alignItems: "center",
-                gap: 5,
-                background: "none",
-                border: "1px solid #3a322b",
-                color: PALETTE.dim,
-                borderRadius: 10,
-                padding: "7px 10px",
-                fontSize: 12,
-                cursor: "pointer",
-              }}
-            >
-              <LogOut size={13} /> {t.logout}
-            </button>
-          </div>
-        ) : (
-          <>
-            <button
-              onClick={onLogin}
-              style={{
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-                background: `linear-gradient(180deg, ${PALETTE.amber}, ${PALETTE.amberSoft})`,
-                border: "none",
-                color: "#1a1510",
-                borderRadius: 12,
-                padding: "11px 0",
-                fontSize: 13.5,
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              <LogIn size={16} /> {t.loginWithGoogle}
-            </button>
-            <div style={{ color: PALETTE.dim, fontSize: 11, marginTop: 8, lineHeight: 1.5 }}>
-              {t.accountHint}
-            </div>
-          </>
-        )}
-      </div>
 
       {notes.length === 0 && (
         <div
