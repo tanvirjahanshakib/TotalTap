@@ -123,7 +123,8 @@ function ChaHisab() {
   const [flash, setFlash] = useState(null);
   const [dueMode, setDueMode] = useState(false);
   const [pendingSettles, setPendingSettles] = useState([]); // [{noteId, ts, amount}] — ক্যালকুলেটরে যোগ হওয়া বাকি এন্ট্রিগুলো
-  const [settlingEntry, setSettlingEntry] = useState(null); // {noteId, entry} — এমাউন্ট বাছাই মোডাল খোলা থাকলে
+  const [settlingEntry, setSettlingEntry] = useState(null); // {noteId, entry} — একটা নির্দিষ্ট এন্ট্রি সেটল করার মোডাল
+  const [settlingTotal, setSettlingTotal] = useState(null); // {noteId, total} — মোট বাকি একসাথে সেটল করার মোডাল
   const [settleAmountInput, setSettleAmountInput] = useState("");
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
@@ -266,6 +267,52 @@ function ChaHisab() {
     queueSettle(noteId, entry, chosen);
     setSettlingEntry(null);
     setSettleAmountInput("");
+  }
+
+  // ---- মোট বাকি (Total Due) একসাথে পরিশোধ ----
+  // নোটের সব "due" এন্ট্রি যোগ করে একটা টোটাল দেখানো হয়, ইউজার তার থেকে যত ইচ্ছা
+  // তত টাকা এখন দিতে পারবে। যেটুকু দেবে সেটুকু সবচেয়ে পুরনো বাকি থেকে শুরু করে
+  // (প্রয়োজনে একটা এন্ট্রি ভেঙে) settle করা হয়, বাকি অংশ "বাকি" হিসেবেই থেকে যায়।
+  function openTotalSettleModal(note) {
+    const total = pendingDues(note).reduce((s, e) => s + e.amount, 0);
+    if (total <= 0) return;
+    setSettlingTotal({ noteId: note.id, total });
+    setSettleAmountInput(String(total));
+  }
+
+  function cancelTotalSettleModal() {
+    setSettlingTotal(null);
+    setSettleAmountInput("");
+  }
+
+  function confirmTotalSettleAmount() {
+    if (!settlingTotal) return;
+    const { noteId, total } = settlingTotal;
+    let chosen = parseFloat(settleAmountInput);
+    if (isNaN(chosen) || chosen <= 0) return;
+    if (chosen > total) chosen = total; // মোট বাকির চেয়ে বেশি পরিশোধ করা যাবে না
+
+    const note = notes.find((n) => n.id === noteId);
+    const dues = pendingDues(note).slice().sort((a, b) => a.ts - b.ts); // সবচেয়ে পুরনোটা আগে (FIFO)
+
+    let remaining = chosen;
+    const newPending = [];
+    for (const e of dues) {
+      if (remaining <= 0) break;
+      const payAmount = Math.min(remaining, e.amount);
+      newPending.push({ noteId, ts: e.ts, amount: payAmount });
+      remaining -= payAmount;
+    }
+
+    setPendingSettles((prev) => [...prev, ...newPending]);
+    setExpr((prev) => {
+      const next = prev ? `${prev}+${chosen}` : `${chosen}`;
+      setDisplay(next);
+      return next;
+    });
+    setSettlingTotal(null);
+    setSettleAmountInput("");
+    setView("calc");
   }
 
   function queueSettle(noteId, entry, chosenAmount) {
@@ -432,6 +479,7 @@ function ChaHisab() {
           <NotesListView
             notes={notes}
             monthlyTotal={monthlyTotal}
+            pendingDues={pendingDues}
             onBack={() => setView("calc")}
             onOpen={(id) => {
               setActiveNoteId(id);
@@ -459,6 +507,7 @@ function ChaHisab() {
             monthlyTotal={monthlyTotal(activeNote)}
             dues={pendingDues(activeNote)}
             onQueueSettle={(entry) => openSettleModal(activeNote, entry)}
+            onPayTotal={() => openTotalSettleModal(activeNote)}
             onBack={() => setView("notes")}
             onDeleteEntry={(ts) => deleteEntry(activeNote.id, ts)}
           />
@@ -483,6 +532,22 @@ function ChaHisab() {
             onChange={setSettleAmountInput}
             onCancel={cancelSettleModal}
             onConfirm={confirmSettleAmount}
+          />
+        )}
+
+        {settlingTotal && (
+          <SettleAmountModal
+            dueAmount={settlingTotal.total}
+            value={settleAmountInput}
+            onChange={setSettleAmountInput}
+            onCancel={cancelTotalSettleModal}
+            onConfirm={confirmTotalSettleAmount}
+            title={lang === "bn" ? "মোট বাকি পরিশোধ" : "Pay Total Due"}
+            subtitle={
+              lang === "bn"
+                ? `মোট বাকি আছে ৳${fmt(settlingTotal.total)} — এখন কত দিচ্ছেন?`
+                : `Total due is ৳${fmt(settlingTotal.total)} — how much are you paying now?`
+            }
           />
         )}
       </div>
@@ -960,6 +1025,7 @@ function CalcView({
 function NotesListView({
   notes,
   monthlyTotal,
+  pendingDues,
   onBack,
   onOpen,
   onAdd,
@@ -1020,44 +1086,61 @@ function NotesListView({
         </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>
-        {notes.map((n) => (
-          <div
-            key={n.id}
-            style={{
-              background: PALETTE.panelSoft,
-              borderRadius: 16,
-              padding: "14px 16px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              border: "1px solid #322b25",
-            }}
-          >
-            <div onClick={() => onOpen(n.id)} style={{ cursor: "pointer", flex: 1 }}>
-              <div style={{ color: PALETTE.cream, fontWeight: 600, fontSize: 15 }}>
-                {n.name}
-              </div>
-              <div style={{ color: PALETTE.amber, fontSize: 13, marginTop: 3 }}>
-                {t.thisMonth} ৳{fmt(monthlyTotal(n))}
-              </div>
-              <div style={{ color: PALETTE.dim, fontSize: 11, marginTop: 2 }}>
-                {t.entriesTotal(n.entries.length)}
-              </div>
-            </div>
-            <button
-              onClick={() => onDelete(n.id)}
+        {notes.map((n) => {
+          const dueTotal = pendingDues
+            ? pendingDues(n).reduce((s, e) => s + e.amount, 0)
+            : 0;
+          return (
+            <div
+              key={n.id}
               style={{
-                background: "none",
-                border: "none",
-                color: PALETTE.dim,
-                cursor: "pointer",
-                padding: 6,
+                background: PALETTE.panelSoft,
+                borderRadius: 16,
+                padding: "14px 16px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                border: "1px solid #322b25",
               }}
             >
-              <Trash2 size={16} />
-            </button>
-          </div>
-        ))}
+              <div onClick={() => onOpen(n.id)} style={{ cursor: "pointer", flex: 1 }}>
+                <div style={{ color: PALETTE.cream, fontWeight: 600, fontSize: 15 }}>
+                  {n.name}
+                </div>
+                <div style={{ color: PALETTE.amber, fontSize: 13, marginTop: 3 }}>
+                  {t.thisMonth} ৳{fmt(monthlyTotal(n))}
+                </div>
+                <div style={{ color: PALETTE.dim, fontSize: 11, marginTop: 2 }}>
+                  {t.entriesTotal(n.entries.length)}
+                </div>
+                {dueTotal > 0 && (
+                  <div
+                    style={{
+                      color: PALETTE.danger,
+                      fontSize: 12,
+                      fontWeight: 700,
+                      marginTop: 3,
+                    }}
+                  >
+                    {t.due} ৳{fmt(dueTotal)}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => onDelete(n.id)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: PALETTE.dim,
+                  cursor: "pointer",
+                  padding: 6,
+                }}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          );
+        })}
       </div>
       <button
         onClick={onAdd}
@@ -1083,8 +1166,10 @@ function NotesListView({
   );
 }
 
-function NoteDetailView({ note, groups, monthlyTotal, dues, onQueueSettle, onBack, onDeleteEntry }) {
-  const { t } = useLang();
+function NoteDetailView({ note, groups, monthlyTotal, dues, onQueueSettle, onPayTotal, onBack, onDeleteEntry }) {
+  const { t, lang } = useLang();
+  const totalDue = dues ? dues.reduce((s, e) => s + e.amount, 0) : 0;
+
   return (
     <div style={{ padding: "4px 18px 22px", minHeight: 480 }}>
       <TopBar title={note.name} onBack={onBack} />
@@ -1108,19 +1193,66 @@ function NoteDetailView({ note, groups, monthlyTotal, dues, onQueueSettle, onBac
             background: `${PALETTE.danger}18`,
             border: `1px solid ${PALETTE.danger}55`,
             borderRadius: 16,
-            padding: "12px 14px",
+            padding: "14px",
           }}
         >
+          {/* মোট বাকি — সব দিনের বাকি এক জায়গায় যোগ হয়ে */}
           <div
             style={{
-              color: PALETTE.danger,
-              fontWeight: 700,
-              fontSize: 13,
-              marginBottom: 8,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              paddingBottom: 12,
+              marginBottom: 12,
+              borderBottom: `1px solid ${PALETTE.danger}33`,
             }}
           >
-            {t.duesListTitle(fmt(dues.reduce((s, e) => s + e.amount, 0)))}
+            <div>
+              <div
+                style={{
+                  color: PALETTE.danger,
+                  fontWeight: 700,
+                  fontSize: 12,
+                  letterSpacing: 0.2,
+                }}
+              >
+                {lang === "bn" ? "মোট বাকি" : "TOTAL DUE"}
+              </div>
+              <div
+                style={{
+                  color: PALETTE.cream,
+                  fontWeight: 700,
+                  fontSize: 24,
+                  marginTop: 3,
+                }}
+              >
+                ৳{fmt(totalDue)}
+              </div>
+            </div>
+            <button
+              onClick={onPayTotal}
+              style={{
+                padding: "11px 18px",
+                borderRadius: 12,
+                border: "none",
+                background: `linear-gradient(180deg, ${PALETTE.amber}, ${PALETTE.amberSoft})`,
+                color: "#1a1510",
+                fontWeight: 700,
+                fontSize: 13.5,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                boxShadow: "0 6px 16px -4px rgba(227,168,87,0.5)",
+              }}
+            >
+              {lang === "bn" ? "পরিশোধ করুন" : "Pay"}
+            </button>
           </div>
+
+          <div style={{ color: PALETTE.dim, fontSize: 11, marginBottom: 8 }}>
+            {lang === "bn" ? "বিস্তারিত বাকির তালিকা:" : "Due breakdown:"}
+          </div>
+
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {dues.map((e) => (
               <div
@@ -1151,11 +1283,11 @@ function NoteDetailView({ note, groups, monthlyTotal, dues, onQueueSettle, onBac
                   style={{
                     padding: "7px 12px",
                     borderRadius: 10,
-                    border: "none",
-                    background: `linear-gradient(180deg, ${PALETTE.amber}, ${PALETTE.amberSoft})`,
-                    color: "#1a1510",
+                    border: `1px solid ${PALETTE.amberSoft}`,
+                    background: "none",
+                    color: PALETTE.amber,
                     fontWeight: 600,
-                    fontSize: 12,
+                    fontSize: 11.5,
                     cursor: "pointer",
                     whiteSpace: "nowrap",
                   }}
@@ -1339,7 +1471,7 @@ function NotificationsView({ items, onBack, onDismiss }) {
   );
 }
 
-function SettleAmountModal({ dueAmount, value, onChange, onCancel, onConfirm }) {
+function SettleAmountModal({ dueAmount, value, onChange, onCancel, onConfirm, title, subtitle }) {
   const { t } = useLang();
   const numVal = parseFloat(value);
   const isValid = !isNaN(numVal) && numVal > 0;
@@ -1366,10 +1498,10 @@ function SettleAmountModal({ dueAmount, value, onChange, onCancel, onConfirm }) 
         }}
       >
         <div style={{ color: PALETTE.cream, fontWeight: 600, fontSize: 15, marginBottom: 4 }}>
-          {t.settleModalTitle}
+          {title || t.settleModalTitle}
         </div>
         <div style={{ color: PALETTE.dim, fontSize: 12, marginBottom: 12 }}>
-          {t.settleModalSubtitle(fmt(dueAmount))}
+          {subtitle || t.settleModalSubtitle(fmt(dueAmount))}
         </div>
         <input
           autoFocus
